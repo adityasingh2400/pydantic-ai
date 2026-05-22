@@ -19,6 +19,7 @@ from pydantic_ai import (
     UserPromptPart,
 )
 from pydantic_ai.agent import Agent
+from pydantic_ai.models import ModelRequestParameters
 from pydantic_ai.output import NativeOutput
 from pydantic_ai.tools import ToolDefinition
 from pydantic_ai.usage import RequestUsage
@@ -124,6 +125,43 @@ def test_bedrock_strict_tool_definition_none(
             }
         }
     )
+
+
+def test_bedrock_strict_none_not_auto_promoted_through_pipeline(
+    allow_model_requests: None,
+    bedrock_provider: BedrockProvider,
+):
+    """`strict=None` tools survive `customize_request_parameters` without auto-promotion to `strict=True`.
+
+    Regression for the case where a large `function_tools` set with `strict=None` would be silently
+    promoted to strict by the schema transformer and breach Bedrock's per-request strict tools cap.
+    Only `strict=True` set by the caller should make it onto `toolSpec.strict`.
+    """
+    model = BedrockConverseModel('us.anthropic.claude-sonnet-4-5-20250929-v1:0', provider=bedrock_provider)
+
+    simple_schema = {'type': 'object', 'properties': {'city': {'type': 'string'}}, 'required': ['city']}
+    params = ModelRequestParameters(
+        function_tools=[
+            ToolDefinition(name='tool_default', parameters_json_schema=dict(simple_schema), strict=None),
+            ToolDefinition(name='tool_explicit_true', parameters_json_schema=dict(simple_schema), strict=True),
+            ToolDefinition(name='tool_explicit_false', parameters_json_schema=dict(simple_schema), strict=False),
+        ]
+    )
+
+    params = model.customize_request_parameters(params)
+
+    by_name = {t.name: t for t in params.function_tools}
+    assert by_name['tool_default'].strict is None
+    assert by_name['tool_explicit_true'].strict is True
+    assert by_name['tool_explicit_false'].strict is False
+
+    tool_specs = {
+        spec['toolSpec']['name']: spec['toolSpec']  # pyright: ignore[reportTypedDictNotRequiredAccess]
+        for spec in (model._map_tool_definition(t) for t in params.function_tools)  # pyright: ignore[reportPrivateUsage]
+    }
+    assert 'strict' not in tool_specs['tool_default']
+    assert tool_specs['tool_explicit_true'].get('strict') is True
+    assert 'strict' not in tool_specs['tool_explicit_false']
 
 
 async def test_bedrock_strict_tool_supported_model(

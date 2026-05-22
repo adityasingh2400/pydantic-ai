@@ -464,6 +464,31 @@ class BedrockConverseModel(Model[BaseClient]):
         """The set of builtin tool types this model can handle."""
         return frozenset({CodeExecutionTool})
 
+    def customize_request_parameters(self, model_request_parameters: ModelRequestParameters) -> ModelRequestParameters:
+        # Capture the caller's original `strict` values on function and output tools so we can suppress
+        # auto-promotion of `strict=None` to `strict=True` after the base class runs the schema
+        # transformer. Bedrock's Converse API caps strict tools per request (20 at the time of
+        # writing per https://docs.aws.amazon.com/bedrock/latest/userguide/structured-output.html),
+        # so silently promoting simple `strict=None` tools to strict can push large toolsets over
+        # the provider limit. Only honor `strict=True` when explicitly set by the caller; NativeOutput
+        # forces `strict=True` on the output object in `prepare_request` and is unaffected.
+        original_function_strict = [t.strict for t in model_request_parameters.function_tools]
+        original_output_strict = [t.strict for t in model_request_parameters.output_tools]
+        model_request_parameters = super().customize_request_parameters(model_request_parameters)
+        if any(s is None for s in original_function_strict) or any(s is None for s in original_output_strict):
+            model_request_parameters = replace(
+                model_request_parameters,
+                function_tools=[
+                    replace(t, strict=None) if original is None else t
+                    for t, original in zip(model_request_parameters.function_tools, original_function_strict)
+                ],
+                output_tools=[
+                    replace(t, strict=None) if original is None else t
+                    for t, original in zip(model_request_parameters.output_tools, original_output_strict)
+                ],
+            )
+        return model_request_parameters
+
     def prepare_request(
         self, model_settings: ModelSettings | None, model_request_parameters: ModelRequestParameters
     ) -> tuple[ModelSettings | None, ModelRequestParameters]:
